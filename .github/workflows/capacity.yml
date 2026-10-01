@@ -1,0 +1,84 @@
+name: Oracle Capacity Watcher
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+jobs:
+  check-capacity:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install OCI CLI
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install oci-cli
+
+      - name: Configure OCI
+        env:
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=$OCI_USER_OCID
+          fingerprint=$OCI_FINGERPRINT
+          tenancy=$OCI_TENANCY_OCID
+          region=$OCI_REGION
+          key_file=$HOME/.oci/oci_api_key.pem
+          EOF
+
+          chmod 600 ~/.oci/config
+
+      - name: Get Availability Domain
+        id: ad
+        run: |
+          AD=$(oci iam availability-domain list \
+            --query 'data[0].name' \
+            --raw-output)
+
+          echo "ad=$AD" >> "$GITHUB_OUTPUT"
+
+      - name: Check A1 capacity
+        id: capacity
+        env:
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+        run: |
+          RESULT=$(oci compute compute-capacity-report create \
+            --availability-domain "${{ steps.ad.outputs.ad }}" \
+            --compartment-id "$OCI_TENANCY_OCID" \
+            --shape-availabilities '[{
+              "instanceShape":"VM.Standard.A1.Flex",
+              "instanceShapeConfig":{
+                "ocpus":2,
+                "memoryInGBs":12
+              }
+            }]' \
+            --query 'data."shape-availabilities"[0]."availability-status"' \
+            --raw-output)
+
+          echo "Oracle capacity status: $RESULT"
+
+          if [ "$RESULT" = "AVAILABLE" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Launch Apply job
+        if: steps.capacity.outputs.available == 'true'
+        env:
+          OCI_STACK_OCID: ${{ secrets.OCI_STACK_OCID }}
+        run: |
+          echo "Capacity available. Launching Resource Manager Apply..."
+          oci resource-manager job create-apply-job \
+            --execution-plan-strategy AUTO_APPROVED \
+            --stack-id "$OCI_STACK_OCID"
