@@ -42,24 +42,23 @@ jobs:
 
           chmod 600 ~/.oci/config
 
-      - name: Check if stack already succeeded
+      - name: Check if successful APPLY already exists
         id: stackstatus
         env:
           OCI_STACK_OCID: ${{ secrets.OCI_STACK_OCID }}
         run: |
           SUCCESS_COUNT=$(oci resource-manager job list \
             --stack-id "$OCI_STACK_OCID" \
-            --lifecycle-state SUCCEEDED \
             --all \
-            --query 'length(data)' \
+            --query 'length(data[?operation==`APPLY` && "lifecycle-state"==`SUCCEEDED`])' \
             --raw-output)
 
           echo "success_count=$SUCCESS_COUNT" >> "$GITHUB_OUTPUT"
 
           if [ "$SUCCESS_COUNT" != "0" ]; then
-            echo "A successful Resource Manager job already exists. Watcher will stop here."
+            echo "Successful APPLY already exists. Nothing else to do."
           else
-            echo "No successful job yet. Continuing."
+            echo "No successful APPLY found. Continuing."
           fi
 
       - name: Get Availability Domain
@@ -180,7 +179,7 @@ jobs:
           gh issue create \
             --repo "$GITHUB_REPOSITORY" \
             --title "🎉 Oracle VM 2 OCPU / 12 GB created successfully" \
-            --body "Oracle encontró capacidad y el Apply terminó correctamente. La instancia 2 OCPU / 12 GB debería estar creada. El watcher ya no intentará lanzar nuevos Applies."
+            --body "Oracle encontró capacidad y el Apply terminó correctamente. La instancia 2 OCPU / 12 GB debería estar creada. A partir del siguiente ciclo, el watcher detectará el APPLY exitoso y no volverá a lanzar otro."
 
       - name: Notify Apply failure
         if: steps.stackstatus.outputs.success_count == '0' && steps.capacity.outputs.large == 'AVAILABLE' && steps.wait.outputs.result != 'SUCCEEDED'
