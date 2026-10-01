@@ -42,7 +42,28 @@ jobs:
 
           chmod 600 ~/.oci/config
 
+      - name: Check if stack already succeeded
+        id: stackstatus
+        env:
+          OCI_STACK_OCID: ${{ secrets.OCI_STACK_OCID }}
+        run: |
+          SUCCESS_COUNT=$(oci resource-manager job list \
+            --stack-id "$OCI_STACK_OCID" \
+            --lifecycle-state SUCCEEDED \
+            --all \
+            --query 'length(data)' \
+            --raw-output)
+
+          echo "success_count=$SUCCESS_COUNT" >> "$GITHUB_OUTPUT"
+
+          if [ "$SUCCESS_COUNT" != "0" ]; then
+            echo "A successful Resource Manager job already exists. Watcher will stop here."
+          else
+            echo "No successful job yet. Continuing."
+          fi
+
       - name: Get Availability Domain
+        if: steps.stackstatus.outputs.success_count == '0'
         id: ad
         run: |
           AD=$(oci iam availability-domain list \
@@ -52,6 +73,7 @@ jobs:
           echo "ad=$AD" >> "$GITHUB_OUTPUT"
 
       - name: Check A1 capacity
+        if: steps.stackstatus.outputs.success_count == '0'
         id: capacity
         env:
           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
@@ -86,7 +108,7 @@ jobs:
           echo "small=$SMALL" >> "$GITHUB_OUTPUT"
 
       - name: Notify if only 1 OCPU / 6 GB is available
-        if: steps.capacity.outputs.large != 'AVAILABLE' && steps.capacity.outputs.small == 'AVAILABLE'
+        if: steps.stackstatus.outputs.success_count == '0' && steps.capacity.outputs.large != 'AVAILABLE' && steps.capacity.outputs.small == 'AVAILABLE'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -106,7 +128,7 @@ jobs:
 
       - name: Launch Apply job for 2 OCPU / 12 GB
         id: apply
-        if: steps.capacity.outputs.large == 'AVAILABLE'
+        if: steps.stackstatus.outputs.success_count == '0' && steps.capacity.outputs.large == 'AVAILABLE'
         env:
           OCI_STACK_OCID: ${{ secrets.OCI_STACK_OCID }}
         run: |
@@ -123,7 +145,7 @@ jobs:
 
       - name: Wait for Apply result
         id: wait
-        if: steps.capacity.outputs.large == 'AVAILABLE'
+        if: steps.stackstatus.outputs.success_count == '0' && steps.capacity.outputs.large == 'AVAILABLE'
         run: |
           JOB_ID="${{ steps.apply.outputs.job_id }}"
 
@@ -151,17 +173,17 @@ jobs:
           echo "result=TIMEOUT" >> "$GITHUB_OUTPUT"
 
       - name: Notify success
-        if: steps.capacity.outputs.large == 'AVAILABLE' && steps.wait.outputs.result == 'SUCCEEDED'
+        if: steps.stackstatus.outputs.success_count == '0' && steps.capacity.outputs.large == 'AVAILABLE' && steps.wait.outputs.result == 'SUCCEEDED'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh issue create \
             --repo "$GITHUB_REPOSITORY" \
             --title "🎉 Oracle VM 2 OCPU / 12 GB created successfully" \
-            --body "Oracle encontró capacidad y el Apply terminó correctamente. La instancia 2 OCPU / 12 GB debería estar creada."
+            --body "Oracle encontró capacidad y el Apply terminó correctamente. La instancia 2 OCPU / 12 GB debería estar creada. El watcher ya no intentará lanzar nuevos Applies."
 
       - name: Notify Apply failure
-        if: steps.capacity.outputs.large == 'AVAILABLE' && steps.wait.outputs.result != 'SUCCEEDED'
+        if: steps.stackstatus.outputs.success_count == '0' && steps.capacity.outputs.large == 'AVAILABLE' && steps.wait.outputs.result != 'SUCCEEDED'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
