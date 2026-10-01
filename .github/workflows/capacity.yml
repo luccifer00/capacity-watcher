@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "*/5 * * * *"
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   check-capacity:
     runs-on: ubuntu-latest
@@ -52,33 +56,116 @@ jobs:
         env:
           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
         run: |
-          RESULT=$(oci compute compute-capacity-report create \
+          REPORT=$(oci compute compute-capacity-report create \
             --availability-domain "${{ steps.ad.outputs.ad }}" \
             --compartment-id "$OCI_TENANCY_OCID" \
-            --shape-availabilities '[{
-              "instanceShape":"VM.Standard.A1.Flex",
-              "instanceShapeConfig":{
-                "ocpus":2,
-                "memoryInGBs":12
+            --shape-availabilities '[
+              {
+                "instanceShape":"VM.Standard.A1.Flex",
+                "instanceShapeConfig":{
+                  "ocpus":2,
+                  "memoryInGBs":12
+                }
+              },
+              {
+                "instanceShape":"VM.Standard.A1.Flex",
+                "instanceShapeConfig":{
+                  "ocpus":1,
+                  "memoryInGBs":6
+                }
               }
-            }]' \
-            --query 'data."shape-availabilities"[0]."availability-status"' \
-            --raw-output)
+            ]')
 
-          echo "Oracle capacity status: $RESULT"
+          LARGE=$(echo "$REPORT" | jq -r '.data["shape-availabilities"][0]["availability-status"]')
+          SMALL=$(echo "$REPORT" | jq -r '.data["shape-availabilities"][1]["availability-status"]')
 
-          if [ "$RESULT" = "AVAILABLE" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
+          echo "2 OCPU / 12 GB: $LARGE"
+          echo "1 OCPU / 6 GB: $SMALL"
+
+          echo "large=$LARGE" >> "$GITHUB_OUTPUT"
+          echo "small=$SMALL" >> "$GITHUB_OUTPUT"
+
+      - name: Notify if only 1 OCPU / 6 GB is available
+        if: steps.capacity.outputs.large != 'AVAILABLE' && steps.capacity.outputs.small == 'AVAILABLE'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search '"Oracle 1 OCPU / 6 GB available" in:title' \
+            --json number \
+            --jq 'length')
+
+          if [ "$EXISTING" = "0" ]; then
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Oracle 1 OCPU / 6 GB available" \
+              --body "La configuración pequeña está disponible, pero 2 OCPU / 12 GB sigue sin capacidad. No se ha creado ninguna instancia."
           fi
 
-      - name: Launch Apply job
-        if: steps.capacity.outputs.available == 'true'
+      - name: Launch Apply job for 2 OCPU / 12 GB
+        id: apply
+        if: steps.capacity.outputs.large == 'AVAILABLE'
         env:
           OCI_STACK_OCID: ${{ secrets.OCI_STACK_OCID }}
         run: |
-          echo "Capacity available. Launching Resource Manager Apply..."
-          oci resource-manager job create-apply-job \
+          echo "Capacity 2/12 AVAILABLE. Launching Apply..."
+
+          JOB_ID=$(oci resource-manager job create-apply-job \
             --execution-plan-strategy AUTO_APPROVED \
-            --stack-id "$OCI_STACK_OCID"
+            --stack-id "$OCI_STACK_OCID" \
+            --query 'data.id' \
+            --raw-output)
+
+          echo "job_id=$JOB_ID" >> "$GITHUB_OUTPUT"
+          echo "Apply job created: $JOB_ID"
+
+      - name: Wait for Apply result
+        id: wait
+        if: steps.capacity.outputs.large == 'AVAILABLE'
+        run: |
+          JOB_ID="${{ steps.apply.outputs.job_id }}"
+
+          for i in {1..40}; do
+            STATUS=$(oci resource-manager job get \
+              --job-id "$JOB_ID" \
+              --query 'data."lifecycle-state"' \
+              --raw-output)
+
+            echo "Apply status: $STATUS"
+
+            if [ "$STATUS" = "SUCCEEDED" ]; then
+              echo "result=SUCCEEDED" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "CANCELED" ]; then
+              echo "result=$STATUS" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            sleep 15
+          done
+
+          echo "result=TIMEOUT" >> "$GITHUB_OUTPUT"
+
+      - name: Notify success
+        if: steps.capacity.outputs.large == 'AVAILABLE' && steps.wait.outputs.result == 'SUCCEEDED'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "🎉 Oracle VM 2 OCPU / 12 GB created successfully" \
+            --body "Oracle encontró capacidad y el Apply terminó correctamente. La instancia 2 OCPU / 12 GB debería estar creada."
+
+      - name: Notify Apply failure
+        if: steps.capacity.outputs.large == 'AVAILABLE' && steps.wait.outputs.result != 'SUCCEEDED'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "⚠️ Oracle capacity found but Apply failed" \
+            --body "Oracle detectó capacidad para 2 OCPU / 12 GB, pero el Apply terminó con estado: ${{ steps.wait.outputs.result }}."
