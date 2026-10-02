@@ -2,11 +2,7 @@ name: Oracle Capacity Watcher
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "1-59/15 * * * *"
-    - cron: "6-59/15 * * * *"
-    - cron: "11-59/15 * * * *"
-    
+  
 permissions:
   contents: read
   issues: write
